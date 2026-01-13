@@ -443,9 +443,9 @@ Respond naturally and briefly:"""
                 stream=True,
                 options={
                     "temperature": 0.2,
-                    "num_predict": 1200,
+                    "num_predict": 500,
                     "top_k": 40,
-                    "top_p": 0.9,
+                    "top_p": 0.8,
                     "num_ctx": 1024,
                     "num_thread": 8,
                     "repeat_penalty": 1.2,

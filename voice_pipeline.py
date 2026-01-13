@@ -510,7 +510,8 @@ async def stream_tts_worker(call_sid: str):
 
                                 audio_chunks_buffer.append(pcm_8k)
                                 
-                                while len(audio_chunks_buffer) > 2:
+                                # Don't buffer - send immediately for smooth playback
+                                if len(audio_chunks_buffer) >= 1:
                                     chunk_to_convert = audio_chunks_buffer.pop(0)
                                     mulaw = audioop.lin2ulaw(chunk_to_convert, 2)
 
@@ -532,7 +533,7 @@ async def stream_tts_worker(call_sid: str):
 
                                         conn.last_tts_send_time = time.time()
                                         chunk_count += 1
-                                        await asyncio.sleep(0.018)
+                                        # No sleep - send as fast as possible
 
                                     if interrupted:
                                         break
@@ -581,7 +582,7 @@ async def stream_tts_worker(call_sid: str):
 
                             conn.last_tts_send_time = time.time()
                             chunk_count += 1
-                            await asyncio.sleep(0.018)
+                            # No sleep - send continuously
 
                         if interrupted:
                             break
@@ -603,7 +604,9 @@ async def stream_tts_worker(call_sid: str):
                                  (t_end - t_start)*1000, chunk_count)
 
             except Exception as e:
-                if "resampler" in str(e).lower() or "audio" in str(e).lower():
+                _logger.error(f"❌ TTS streaming error: {e}")
+                if "resampler" in str(e).lower() or "ratecv" in str(e).lower():
+                    _logger.warning("⚠️ Resampler error detected - resetting state")
                     conn.resampler_state = None
 
             if conn.tts_queue.empty():
