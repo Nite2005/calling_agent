@@ -1,0 +1,8 @@
+.env
+server.log
+server.log
+*.log
+*.log
+server.log
+.env
+.env.*
