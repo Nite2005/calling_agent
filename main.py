@@ -348,12 +348,19 @@ async def query_rag_streaming(
     raw_docs = results.get("documents", [[]])[0] if results else []
     distances = results.get("distances", [[]])[0] if results else []
 
+    # Filter by distance threshold for relevance
     relevant_chunks = []
     for doc, dist in zip(raw_docs, distances):
-        if dist <= 1.3:
+        if dist <= 1.0:  # Stricter threshold (was 1.3)
             relevant_chunks.append(doc)
+            _logger.debug(f"📄 Chunk (dist={dist:.3f}): {doc[:80]}...")
+    
+    _logger.info(f"🔍 RAG: '{question[:60]}...' | Found {len(relevant_chunks)}/{len(raw_docs)} relevant chunks")
+    
+    if not relevant_chunks:
+        _logger.warning(f"⚠️ NO relevant chunks found! Distances: {[f'{d:.3f}' for d in distances[:3]]}")
 
-    context_text = "\n".join(relevant_chunks[:3])
+    context_text = "\n\n---\n\n".join(relevant_chunks[:3])
 
     history_text = ""
     if history and len(history) > 0:
@@ -390,6 +397,10 @@ async def query_rag_streaming(
 ## Current Date (America/New_York):
 Today is {current_date}.{vars_section}
 
+## CRITICAL INSTRUCTION:
+You MUST answer ONLY from the Knowledge Base Context below. If the information is NOT in the context, say: "I don't have that specific information. Let me connect you with someone who can help."
+DO NOT use any external knowledge or make assumptions.
+
 ## Knowledge Base Context:
 {context_text if context_text.strip() else "No specific context found."}
 
@@ -399,7 +410,8 @@ Today is {current_date}.{vars_section}
 ## User's Current Question:
 {question}"""
     else:
-        prompt = f"""You are MILA, a friendly voice assistant.
+        prompt = f"""You are MILA, a HUMAN sales representative on a LIVE phone call.
+
 ## Current Date:
 Today is {current_date}.
 
@@ -407,6 +419,10 @@ Today is {current_date}.
 - You're on a LIVE phone call
 - Keep responses BRIEF (1-2 sentences max)
 - Sound conversational, not scripted
+
+## CRITICAL INSTRUCTION:
+Answer ONLY from the Knowledge Base below. If the answer is NOT in the Knowledge Base, say: "I don't have that information. Is there something else I can help with?"
+DO NOT use general knowledge.
 
 ## Knowledge Base:
 {context_text if context_text else "No specific context."}
@@ -417,7 +433,7 @@ Today is {current_date}.
 ## What they just said:
 {question}
 
-Respond naturally and briefly:"""
+Respond naturally and briefly based ONLY on the Knowledge Base:"""
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=500)
     full_response = ""
@@ -442,7 +458,7 @@ Respond naturally and briefly:"""
                 prompt=prompt,
                 stream=True,
                 options={
-                    "temperature": 0.2,
+                    "temperature": 0.3,
                     "num_predict": 500,
                     "top_k": 40,
                     "top_p": 0.8,
@@ -451,7 +467,7 @@ Respond naturally and briefly:"""
                     "repeat_penalty": 1.2,
                     "repeat_last_n": 128,
                     "num_gpu": 99,
-                    "stop": ["\nUser:", "\nAssistant:", "User:"],
+                    "stop": [". ", "? ","\nUser:", "\nAssistant:", "User:"],
                 }
             ):
                 token = chunk.get("response")
@@ -1358,7 +1374,7 @@ async def media_ws(websocket: WebSocket):
                             INTERRUPT_MIN_ENERGY
                         )
 
-                        # Smart interrupt detection - responsive to user speaking while agent is speaking
+                        # 🎯 ULTRA-RESPONSIVE INTERRUPT DETECTION
                         if (INTERRUPT_ENABLED and conn.agent_config and 
                             conn.agent_config.get("interrupt_enabled", True) and 
                             conn.currently_speaking and not conn.interrupt_requested):
@@ -1367,30 +1383,39 @@ async def media_ws(websocket: WebSocket):
                             if energy > energy_threshold:
                                 conn.speech_energy_buffer.append(energy)
                                 
-                                # More responsive: require fewer samples for faster detection
+                                # Mark speech start time on first high energy detection
+                                if conn.speech_start_time is None:
+                                    conn.speech_start_time = now
+                                    _logger.debug(f"🎙️ Interrupt detection: energy={energy:.0f} > {energy_threshold:.0f}")
+                                
+                                # FAST TRIGGER: Need only 2 consecutive high-energy samples
                                 if len(conn.speech_energy_buffer) >= 2:
-                                    high_energy_count = sum(1 for e in conn.speech_energy_buffer if e > energy_threshold)
+                                    recent_samples = list(conn.speech_energy_buffer)[-3:]
+                                    high_energy_count = sum(1 for e in recent_samples if e > energy_threshold)
+                                    
+                                    # Trigger if 2 out of last 3 samples are high energy
                                     if high_energy_count >= 2:
-                                        # Mark speech start time for minimum duration check
-                                        if conn.speech_start_time is None:
-                                            conn.speech_start_time = now
-                                        
-                                        # Check if minimum speech duration met
                                         speech_duration_ms = (now - conn.speech_start_time) * 1000
+                                        
+                                        # Lower minimum duration for faster response
                                         if speech_duration_ms >= INTERRUPT_MIN_SPEECH_MS:
-                                            # Check debounce to avoid multiple interrupts
                                             time_since_last_interrupt = (now - conn.last_interrupt_time) * 1000
+                                            
                                             if time_since_last_interrupt >= INTERRUPT_DEBOUNCE_MS:
-                                                # Optional: Check if we have text from user
+                                                # Optional text check (usually disabled for speed)
                                                 has_text = bool(conn.stt_transcript_buffer.strip()) if INTERRUPT_REQUIRE_TEXT else True
                                                 
                                                 if has_text:
-                                                    _logger.info(f"🎯 INTERRUPT TRIGGERED: energy={energy:.0f} threshold={energy_threshold:.0f} duration={speech_duration_ms:.0f}ms buffer_samples={len(conn.speech_energy_buffer)}")
+                                                    _logger.info(f"⚡ INTERRUPT! energy={energy:.0f} threshold={energy_threshold:.0f} duration={speech_duration_ms:.0f}ms")
                                                     conn.last_interrupt_time = now
                                                     await handle_interrupt(current_call_sid)
+                                                    # Clear buffer after successful interrupt
+                                                    conn.speech_energy_buffer.clear()
+                                                    conn.speech_start_time = None
                             else:
-                                # Reset speech detection when energy drops
-                                if conn.speech_start_time is not None:
+                                # Reset when energy drops (with lower threshold for faster reset)
+                                if conn.speech_start_time is not None and energy < (energy_threshold * 0.6):
+                                    _logger.debug(f"⬇️ Energy dropped, resetting")
                                     conn.speech_energy_buffer.clear()
                                     conn.speech_start_time = None
 

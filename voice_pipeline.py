@@ -231,12 +231,12 @@ class WSConn:
         # Smart interrupt detection
         self.user_speech_detected: bool = False
         self.speech_start_time: Optional[float] = None
-        self.speech_energy_buffer: deque = deque(maxlen=50)
+        self.speech_energy_buffer: deque = deque(maxlen=10)
         self.last_interrupt_time: float = 0
         self.interrupt_debounce: float = INTERRUPT_DEBOUNCE_MS / 1000.0
 
         self.baseline_energy: float = INTERRUPT_MIN_ENERGY * 0.5
-        self.background_samples: deque = deque(maxlen=50)
+        self.background_samples: deque = deque(maxlen=30)
 
         self.last_interim_text: str = ""
         self.last_interim_time: float = 0.0
@@ -345,16 +345,36 @@ def update_baseline(conn: WSConn, energy: int):
 
 
 async def handle_interrupt(call_sid: str):
-    """Handle user interruption with seamless transition"""
+    """Handle user interruption with INSTANT audio cutoff"""
     conn = manager.get(call_sid)
     if not conn:
         return
 
-    _logger.info("🛑 INTERRUPT - Seamless transition to user input")
+    _logger.info("⚡ INTERRUPT TRIGGERED - Immediate audio stop")
 
+    # PRIORITY 1: Stop audio INSTANTLY
     conn.interrupt_requested = True
+    conn.currently_speaking = False
+    conn.is_responding = False
 
-    # Immediately clear the TTS queue for instant response
+    # PRIORITY 2: Clear Twilio audio stream FIRST (most important for user experience)
+    try:
+        if conn.stream_sid:
+            await conn.ws.send_json({
+                "event": "clear",
+                "streamSid": conn.stream_sid
+            })
+            # Send multiple clear commands for reliability
+            await asyncio.sleep(0.01)
+            await conn.ws.send_json({
+                "event": "clear",
+                "streamSid": conn.stream_sid
+            })
+            _logger.info("📡 Audio cleared in stream")
+    except Exception as e:
+        _logger.warning(f"Stream clear warning: {e}")
+
+    # PRIORITY 3: Aggressively clear TTS queue
     cleared = 0
     while not conn.tts_queue.empty():
         try:
@@ -364,41 +384,24 @@ async def handle_interrupt(call_sid: str):
         except:
             break
 
-    # Send media clear command to Twilio for instant audio cutoff
-    try:
-        if conn.stream_sid:
-            await conn.ws.send_json({
-                "event": "clear",
-                "streamSid": conn.stream_sid
-            })
-    except:
-        pass
-
-    # Reset buffers and flags for seamless transition
+    # PRIORITY 4: Reset all state for clean user input
     conn.stt_transcript_buffer = ""
     conn.stt_is_final = False
     conn.last_transcript = ""
-
-    conn.currently_speaking = False
-    conn.is_responding = False
     
-    # Reset speech detection for fresh interrupt handling
+    # Reset speech detection
     conn.speech_energy_buffer.clear()
     conn.speech_start_time = None
     conn.user_speech_detected = False
-    conn.last_speech_time = 0
+    conn.last_speech_time = time.time()
     conn.silence_start = None
 
+    # Reset interim processing
     conn.last_interim_text = ""
     conn.last_interim_time = 0.0
     conn.last_interim_conf = 0.0
 
-    _logger.info(
-        "✅ Interrupt handled (seamless):\n"
-        "   Cleared TTS items: %d\n"
-        "   Ready for user input",
-        cleared
-    )
+    _logger.info(f"✅ INTERRUPT COMPLETE: Cleared {cleared} TTS items, ready for user")
 
 
 async def stream_tts_worker(call_sid: str):
@@ -421,15 +424,20 @@ async def stream_tts_worker(call_sid: str):
                 continue
 
             if conn.interrupt_requested:
-                _logger.info("🛑 Skipping batch due to interrupt")
+                _logger.info("⚡ TTS interrupted - immediate stop")
+                # Aggressively clear remaining TTS queue
                 while not conn.tts_queue.empty():
                     try:
                         conn.tts_queue.get_nowait()
                         conn.tts_queue.task_done()
                     except:
                         break
+                # Reset all speaking state
                 conn.currently_speaking = False
                 conn.interrupt_requested = False
+                conn.speech_energy_buffer.clear()
+                conn.speech_start_time = None
+                _logger.info("✅ TTS stopped, ready for user")
                 break
 
             _logger.info("🎤 TTS sentence (%d chars): '%s...'",
@@ -615,6 +623,7 @@ async def stream_tts_worker(call_sid: str):
                 conn.speech_energy_buffer.clear()
                 conn.speech_start_time = None
                 conn.user_speech_detected = False
+                _logger.info("🎤 TTS queue empty - agent finished speaking")
 
     except asyncio.CancelledError:
         pass

@@ -38,16 +38,16 @@ DEEPGRAM_VOICE = os.getenv("DEEPGRAM_VOICE", "aura-2-thalia-en")
 DATA_FILE = os.getenv("DATA_FILE", "./data/data.json")
 CHROMA_PATH = os.getenv("CHROMA_PATH", "./chroma_db")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mixtral:8x7b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "384"))
 TOP_K = int(os.getenv("TOP_K", "3"))
 
-# 🎯 SMART INTERRUPT SETTINGS
+# 🎯 SMART INTERRUPT SETTINGS - Optimized for fast, natural interruption
 INTERRUPT_ENABLED = os.getenv("INTERRUPT_ENABLED", "true").lower() == "true"
-INTERRUPT_MIN_ENERGY = int(os.getenv("INTERRUPT_MIN_ENERGY", "1000"))
-INTERRUPT_DEBOUNCE_MS = int(os.getenv("INTERRUPT_DEBOUNCE_MS", "1000"))
-INTERRUPT_BASELINE_FACTOR = float(os.getenv("INTERRUPT_BASELINE_FACTOR", "3.5"))
-INTERRUPT_MIN_SPEECH_MS = int(os.getenv("INTERRUPT_MIN_SPEECH_MS", "300"))
+INTERRUPT_MIN_ENERGY = int(os.getenv("INTERRUPT_MIN_ENERGY", "600"))  # Lower threshold for better sensitivity
+INTERRUPT_DEBOUNCE_MS = int(os.getenv("INTERRUPT_DEBOUNCE_MS", "300"))  # Faster re-interrupt capability
+INTERRUPT_BASELINE_FACTOR = float(os.getenv("INTERRUPT_BASELINE_FACTOR", "2.2"))  # More sensitive to speech
+INTERRUPT_MIN_SPEECH_MS = int(os.getenv("INTERRUPT_MIN_SPEECH_MS", "150"))  # Faster interrupt trigger
 INTERRUPT_REQUIRE_TEXT = os.getenv("INTERRUPT_REQUIRE_TEXT", "false").lower() == "true"
 
 # ✅ SILENCE DETECTION
