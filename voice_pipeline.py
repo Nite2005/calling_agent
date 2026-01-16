@@ -494,13 +494,21 @@ async def stream_tts_worker(call_sid: str):
                                 continue
 
                             try:
+                                resampler_chunk_size = int(os.getenv('RESAMPLER_CHUNK_BUFFER_SIZE', '160'))
+                                resampler_width = int(os.getenv('RESAMPLER_SAMPLE_WIDTH', '2'))
+                                resampler_channels = int(os.getenv('RESAMPLER_CHANNELS', '1'))
+                                resampler_input_rate = int(os.getenv('RESAMPLER_INPUT_RATE', '16000'))
+                                resampler_output_rate = int(os.getenv('RESAMPLER_OUTPUT_RATE', '8000'))
+                                
                                 if conn.resampler_state is None:
                                     _, conn.resampler_state = audioop.ratecv(
-                                        b'\x00' * 160, 2, 1, 16000, 8000, None
+                                        b'\x00' * resampler_chunk_size, resampler_width, resampler_channels,
+                                        resampler_input_rate, resampler_output_rate, None
                                     )
 
                                 pcm_8k, conn.resampler_state = audioop.ratecv(
-                                    audio_chunk, 2, 1, 16000, 8000,
+                                    audio_chunk, resampler_width, resampler_channels,
+                                    resampler_input_rate, resampler_output_rate,
                                     conn.resampler_state
                                 )
 

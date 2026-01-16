@@ -410,8 +410,7 @@ DO NOT use any external knowledge or make assumptions.
 ## User's Current Question:
 {question}"""
     else:
-        prompt = f"""You are MILA, a HUMAN sales representative on a LIVE phone call.
-
+        prompt =  prompt = f"""You are MILA, a friendly voice assistant.
 ## Current Date:
 Today is {current_date}.
 
@@ -419,10 +418,6 @@ Today is {current_date}.
 - You're on a LIVE phone call
 - Keep responses BRIEF (1-2 sentences max)
 - Sound conversational, not scripted
-
-## CRITICAL INSTRUCTION:
-Answer ONLY from the Knowledge Base below. If the answer is NOT in the Knowledge Base, say: "I don't have that information. Is there something else I can help with?"
-DO NOT use general knowledge.
 
 ## Knowledge Base:
 {context_text if context_text else "No specific context."}
@@ -433,7 +428,7 @@ DO NOT use general knowledge.
 ## What they just said:
 {question}
 
-Respond naturally and briefly based ONLY on the Knowledge Base:"""
+Respond naturally and briefly:"""
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=500)
     full_response = ""
@@ -463,11 +458,11 @@ Respond naturally and briefly based ONLY on the Knowledge Base:"""
                     "top_k": 40,
                     "top_p": 0.8,
                     "num_ctx": 1024,
-                    "num_thread": 8,
+                    "num_thread": 9,
                     "repeat_penalty": 1.2,
                     "repeat_last_n": 128,
                     "num_gpu": 99,
-                    "stop": [". ", "? ","\nUser:", "\nAssistant:", "User:"],
+                    "stop": ["\nUser:", "\nAssistant:", "User:"],
                 }
             ):
                 token = chunk.get("response")
@@ -1301,8 +1296,15 @@ async def media_ws(websocket: WebSocket):
                     # Initialize resampler
                     dummy_state = None
                     try:
+                        resampler_init_size = int(os.getenv('RESAMPLER_INIT_BUFFER_SIZE', '3200'))
+                        resampler_width = int(os.getenv('RESAMPLER_SAMPLE_WIDTH', '2'))
+                        resampler_channels = int(os.getenv('RESAMPLER_CHANNELS', '1'))
+                        resampler_input_rate = int(os.getenv('RESAMPLER_INPUT_RATE', '16000'))
+                        resampler_output_rate = int(os.getenv('RESAMPLER_OUTPUT_RATE', '8000'))
+                        
                         _, dummy_state = audioop.ratecv(
-                            b'\x00' * 3200, 2, 1, 16000, 8000, dummy_state
+                            b'\x00' * resampler_init_size, resampler_width, resampler_channels,
+                            resampler_input_rate, resampler_output_rate, dummy_state
                         )
                         conn.resampler_state = dummy_state
                         conn.resampler_initialized = True
