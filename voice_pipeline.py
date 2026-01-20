@@ -249,7 +249,7 @@ class WSConn:
         self.vad_triggered_time: Optional[float] = None
         self.vad_validation_threshold: float = 0.3
         self.vad_validated: bool = False
-        self.vad_timeout: float = 2.0  # Reduced from 5.0 to 2.0 seconds for faster response
+        self.vad_timeout: float = 0.5  # Optimized for minimal lag
         self.energy_drop_time: Optional[float] = None
         self.last_valid_speech_energy: float = 0.0
 
@@ -344,37 +344,17 @@ def update_baseline(conn: WSConn, energy: int):
                 conn.baseline_energy = (conn.baseline_energy * 0.7) + (weighted_median * 0.3)
 
 
+
 async def handle_interrupt(call_sid: str):
-    """Handle user interruption with INSTANT audio cutoff"""
+    """Handle user interruption with complete cleanup"""
     conn = manager.get(call_sid)
     if not conn:
         return
 
-    _logger.info("⚡ INTERRUPT TRIGGERED - Immediate audio stop")
+    _logger.info("ðŸ›‘ INTERRUPT - Stopping playback and clearing buffers")
 
-    # PRIORITY 1: Stop audio INSTANTLY
     conn.interrupt_requested = True
-    conn.currently_speaking = False
-    conn.is_responding = False
 
-    # PRIORITY 2: Clear Twilio audio stream FIRST (most important for user experience)
-    try:
-        if conn.stream_sid:
-            await conn.ws.send_json({
-                "event": "clear",
-                "streamSid": conn.stream_sid
-            })
-            # Send multiple clear commands for reliability
-            await asyncio.sleep(0.01)
-            await conn.ws.send_json({
-                "event": "clear",
-                "streamSid": conn.stream_sid
-            })
-            _logger.info("📡 Audio cleared in stream")
-    except Exception as e:
-        _logger.warning(f"Stream clear warning: {e}")
-
-    # PRIORITY 3: Aggressively clear TTS queue
     cleared = 0
     while not conn.tts_queue.empty():
         try:
@@ -384,34 +364,53 @@ async def handle_interrupt(call_sid: str):
         except:
             break
 
-    # PRIORITY 4: Reset all state for clean user input
+    try:
+        if conn.stream_sid:  # ✅ Validate stream_sid exists
+            await conn.ws.send_json({
+                "event": "clear",
+                "streamSid": conn.stream_sid
+            })
+    except:
+        pass
+
+    old_buffer = conn.stt_transcript_buffer
     conn.stt_transcript_buffer = ""
     conn.stt_is_final = False
     conn.last_transcript = ""
-    
-    # Reset speech detection
+
+    conn.currently_speaking = False
+    conn.is_responding = False
     conn.speech_energy_buffer.clear()
     conn.speech_start_time = None
     conn.user_speech_detected = False
-    conn.last_speech_time = time.time()
+    conn.last_speech_time = 0
     conn.silence_start = None
 
-    # Reset interim processing
     conn.last_interim_text = ""
     conn.last_interim_time = 0.0
     conn.last_interim_conf = 0.0
 
-    _logger.info(f"✅ INTERRUPT COMPLETE: Cleared {cleared} TTS items, ready for user")
+    _logger.info(
+        "âœ… Interrupt handled:\n"
+        "   Cleared TTS items: %d\n"
+        "   Cleared STT buffer: '%s'\n"
+        "   Ready for new input",
+        cleared, old_buffer[:50] if old_buffer else "(empty)"
+    )
 
 
 async def stream_tts_worker(call_sid: str):
-    """Stream TTS worker"""
+    """âš¡ OPTIMIZED TTS - Fast first response + smooth playback + no clicks"""
     conn = manager.get(call_sid)
     if not conn:
         return
 
+    # Single resampler for entire session (critical for smoothness)
+    # persistent_resampler_state = None
+
     try:
         while True:
+            # âœ… SINGLE SENTENCE: Process one sentence at a time
             text = await conn.tts_queue.get()
 
             if text is None:
@@ -424,31 +423,27 @@ async def stream_tts_worker(call_sid: str):
                 continue
 
             if conn.interrupt_requested:
-                _logger.info("⚡ TTS interrupted - immediate stop")
-                # Aggressively clear remaining TTS queue
+                _logger.info("ðŸ›‘ Skipping batch due to interrupt")
                 while not conn.tts_queue.empty():
                     try:
                         conn.tts_queue.get_nowait()
                         conn.tts_queue.task_done()
                     except:
                         break
-                # Reset all speaking state
                 conn.currently_speaking = False
                 conn.interrupt_requested = False
-                conn.speech_energy_buffer.clear()
-                conn.speech_start_time = None
-                _logger.info("✅ TTS stopped, ready for user")
+                # persistent_resampler_state = None
                 break
 
-            _logger.info("🎤 TTS sentence (%d chars): '%s...'",
+            _logger.info("ðŸŽ¤ TTS sentence (%d chars): '%s...'",
                          len(text), text[:80])
 
             t_start = time.time()
             conn.currently_speaking = True
             conn.speech_energy_buffer.clear()
             conn.speech_start_time = None
-            is_first_chunk = True
-            audio_chunks_buffer = []
+            is_first_chunk = True  # Track first chunk of sentence
+            audio_chunks_buffer = []  # Buffer to apply fade-out to last chunk
 
             try:
                 url = "https://api.deepgram.com/v1/speak"
@@ -458,8 +453,13 @@ async def stream_tts_worker(call_sid: str):
                 }
                 payload = {"text": text}
                 
-                voice_to_use = DEEPGRAM_VOICE
+                # ✨ Use custom voice if provided, otherwise agent default, otherwise env default
+                voice_to_use = DEEPGRAM_VOICE  # Default from env
                 voice_source = "env_default"
+                
+                # 🔍 DEBUG: Log raw values for debugging
+                _logger.debug(f"🔍 TTS Voice Debug - conn.custom_voice_id: '{conn.custom_voice_id}'")
+                _logger.debug(f"🔍 TTS Voice Debug - conn.agent_config: {conn.agent_config}")
                 
                 if conn.custom_voice_id and str(conn.custom_voice_id).strip():
                     voice_to_use = conn.custom_voice_id
@@ -468,7 +468,8 @@ async def stream_tts_worker(call_sid: str):
                     voice_to_use = conn.agent_config["voice_id"]
                     voice_source = "agent_config"
                 
-                _logger.info(f"🎤 TTS Voice: {voice_to_use} (source: {voice_source})")
+                # Log voice selection for EVERY sentence (to debug first message issue)
+                _logger.info(f"🎤 TTS Voice: {voice_to_use} (source: {voice_source}) for text: '{text[:50]}...'")
                 
                 params = {
                     "model": voice_to_use,
@@ -486,7 +487,8 @@ async def stream_tts_worker(call_sid: str):
 
                         async for audio_chunk in response.aiter_bytes(chunk_size=3200):
                             if conn.interrupt_requested:
-                                _logger.info("🛑 TTS interrupted at chunk %d", chunk_count)
+                                _logger.info(
+                                    "ðŸ›' TTS interrupted at chunk %d", chunk_count)
                                 interrupted = True
                                 break
 
@@ -494,40 +496,42 @@ async def stream_tts_worker(call_sid: str):
                                 continue
 
                             try:
-                                resampler_chunk_size = int(os.getenv('RESAMPLER_CHUNK_BUFFER_SIZE', '160'))
-                                resampler_width = int(os.getenv('RESAMPLER_SAMPLE_WIDTH', '2'))
-                                resampler_channels = int(os.getenv('RESAMPLER_CHANNELS', '1'))
-                                resampler_input_rate = int(os.getenv('RESAMPLER_INPUT_RATE', '16000'))
-                                resampler_output_rate = int(os.getenv('RESAMPLER_OUTPUT_RATE', '8000'))
-                                
+                                # ✅ CRITICAL: Ensure resampler is initialized before first chunk
                                 if conn.resampler_state is None:
+                                    # Initialize resampler with silence
                                     _, conn.resampler_state = audioop.ratecv(
-                                        b'\x00' * resampler_chunk_size, resampler_width, resampler_channels,
-                                        resampler_input_rate, resampler_output_rate, None
+                                        b'\x00' * 160, 2, 1, 16000, 8000, None
                                     )
 
+                                # ✅ CRITICAL: Reuse same resampler state across all sentences
                                 pcm_8k, conn.resampler_state = audioop.ratecv(
-                                    audio_chunk, resampler_width, resampler_channels,
-                                    resampler_input_rate, resampler_output_rate,
+                                    audio_chunk, 2, 1, 16000, 8000,
                                     conn.resampler_state
                                 )
 
+                                # ✅ FIX: Apply fade-in to first chunk to prevent clicks
                                 if is_first_chunk and len(pcm_8k) >= 320:
+                                    # Convert to list for manipulation
                                     samples = list(struct.unpack(
                                         f'<{len(pcm_8k)//2}h', pcm_8k))
 
+                                    # Apply fade-in to first 160 samples (20ms at 8kHz)
                                     fade_samples = min(160, len(samples))
                                     for i in range(fade_samples):
                                         fade_factor = (i + 1) / fade_samples
-                                        samples[i] = int(samples[i] * fade_factor)
+                                        samples[i] = int(
+                                            samples[i] * fade_factor)
 
-                                    pcm_8k = struct.pack(f'<{len(samples)}h', *samples)
+                                    # Repack
+                                    pcm_8k = struct.pack(
+                                        f'<{len(samples)}h', *samples)
                                     is_first_chunk = False
 
+                                # Buffer the chunk for potential fade-out processing
                                 audio_chunks_buffer.append(pcm_8k)
                                 
-                                # Don't buffer - send immediately for smooth playback
-                                if len(audio_chunks_buffer) >= 1:
+                                # Convert and send buffered chunks (keep last 1 for fade-out)
+                                while len(audio_chunks_buffer) > 1:
                                     chunk_to_convert = audio_chunks_buffer.pop(0)
                                     mulaw = audioop.lin2ulaw(chunk_to_convert, 2)
 
@@ -538,7 +542,8 @@ async def stream_tts_worker(call_sid: str):
 
                                         chunk_to_send = mulaw[i:i+160]
                                         if len(chunk_to_send) < 160:
-                                            chunk_to_send += b'\xff' * (160 - len(chunk_to_send))
+                                            chunk_to_send += b'\xff' * \
+                                                (160 - len(chunk_to_send))
 
                                         success = await manager.send_media_chunk(
                                             call_sid, conn.stream_sid, chunk_to_send
@@ -549,7 +554,7 @@ async def stream_tts_worker(call_sid: str):
 
                                         conn.last_tts_send_time = time.time()
                                         chunk_count += 1
-                                        # No sleep - send as fast as possible
+                                        # Removed sleep for faster playback
 
                                     if interrupted:
                                         break
@@ -557,15 +562,18 @@ async def stream_tts_worker(call_sid: str):
                             except Exception as e:
                                 continue
                 
+                # ✅ Process remaining buffered chunks with fade-out on the last one
                 if not interrupted and audio_chunks_buffer:
                     for idx, chunk_to_convert in enumerate(audio_chunks_buffer):
                         is_last_chunk = (idx == len(audio_chunks_buffer) - 1)
                         
+                        # Apply fade-out to last chunk to prevent clicks between sentences
                         if is_last_chunk and len(chunk_to_convert) >= 320:
                             try:
                                 samples = list(struct.unpack(
                                     f'<{len(chunk_to_convert)//2}h', chunk_to_convert))
                                 
+                                # Apply fade-out to last 160 samples (20ms at 8kHz)
                                 fade_samples = min(160, len(samples))
                                 start_idx = len(samples) - fade_samples
                                 for i in range(fade_samples):
@@ -587,7 +595,8 @@ async def stream_tts_worker(call_sid: str):
 
                             chunk_to_send = mulaw[i:i+160]
                             if len(chunk_to_send) < 160:
-                                chunk_to_send += b'\xff' * (160 - len(chunk_to_send))
+                                chunk_to_send += b'\xff' * \
+                                    (160 - len(chunk_to_send))
 
                             success = await manager.send_media_chunk(
                                 call_sid, conn.stream_sid, chunk_to_send
@@ -598,17 +607,19 @@ async def stream_tts_worker(call_sid: str):
 
                             conn.last_tts_send_time = time.time()
                             chunk_count += 1
-                            # No sleep - send continuously
+                            # Removed sleep for faster playback
 
                         if interrupted:
                             break
                     
+                    # Clear buffer after processing
                     audio_chunks_buffer.clear()
 
                 t_end = time.time()
 
                 if interrupted:
                     await handle_interrupt(call_sid)
+                    # Keep resampler state - don't reset on interrupt
                     while not conn.tts_queue.empty():
                         try:
                             conn.tts_queue.get_nowait()
@@ -616,22 +627,23 @@ async def stream_tts_worker(call_sid: str):
                         except:
                             break
                 else:
-                    _logger.info("✅ Sentence completed in %.0fms (%d chunks)",
-                                 (t_end - t_start)*1000, chunk_count)
+                    _logger.info("âœ… Sentence completed in %.0fms (%d chunks, %.1f chars/sec)",
+                                 (t_end - t_start)*1000, chunk_count,
+                                 len(text) / (t_end - t_start) if (t_end - t_start) > 0 else 0)
 
             except Exception as e:
-                _logger.error(f"❌ TTS streaming error: {e}")
-                if "resampler" in str(e).lower() or "ratecv" in str(e).lower():
-                    _logger.warning("⚠️ Resampler error detected - resetting state")
+                # ✅ Only reset resampler on serious conversion errors
+                if "resampler" in str(e).lower() or "audio" in str(e).lower():
                     conn.resampler_state = None
 
+            # Only clear state when truly done
             if conn.tts_queue.empty():
                 conn.currently_speaking = False
                 conn.interrupt_requested = False
                 conn.speech_energy_buffer.clear()
                 conn.speech_start_time = None
                 conn.user_speech_detected = False
-                _logger.info("🎤 TTS queue empty - agent finished speaking")
+                # Keep resampler for next turn
 
     except asyncio.CancelledError:
         pass
@@ -643,13 +655,13 @@ async def stream_tts_worker(call_sid: str):
 
 
 async def speak_text_streaming(call_sid: str, text: str):
-    """Queue text with sentence splitting"""
+    """âš¡ Queue text with smart sentence splitting"""
     conn = manager.get(call_sid)
     if not conn or not conn.stream_sid:
         return
 
     try:
-        if conn.stream_sid:
+        if conn.stream_sid:  # ✅ Validate stream_sid exists
             await conn.ws.send_json({
                 "event": "clear",
                 "streamSid": conn.stream_sid
@@ -657,13 +669,12 @@ async def speak_text_streaming(call_sid: str, text: str):
     except:
         pass
 
-    # Set flag immediately - agent is about to speak
     conn.currently_speaking = True
     conn.interrupt_requested = False
     conn.speech_energy_buffer.clear()
     conn.user_speech_detected = False
 
-    # Split into sentences
+    # âœ… Split into sentences for queue
     sentences = []
     current = ""
     for char in text:
@@ -674,29 +685,28 @@ async def speak_text_streaming(call_sid: str, text: str):
     if current.strip():
         sentences.append(current.strip())
 
+    # Queue all sentences (worker will batch them automatically)
     for sentence in sentences:
         if sentence:
             try:
-                await asyncio.wait_for(conn.tts_queue.put(sentence), timeout=2.0)
+                await asyncio.wait_for(conn.tts_queue.put(sentence), timeout=0.5)
             except asyncio.TimeoutError:
                 break
             except Exception as e:
                 break
 
-    # Wait for TTS processing to complete
-    # stream_tts_worker will manage currently_speaking flag during streaming
     await conn.tts_queue.join()
+    conn.currently_speaking = False
+
 
 
 async def setup_streaming_stt(call_sid: str):
-    """Setup Deepgram streaming STT"""
+    """âš¡ Setup Deepgram streaming STT with improved VAD"""
     conn = manager.get(call_sid)
     if not conn:
-        _logger.error("❌ Connection not found for call_sid: %s", call_sid)
         return
 
     try:
-        _logger.info("🎤 Creating Deepgram live connection...")
         dg_connection = deepgram.listen.live.v("1")
 
         def on_message(self, result, **kwargs):
@@ -711,63 +721,87 @@ async def setup_streaming_stt(call_sid: str):
                 is_final = result.is_final
                 now = time.time()
 
-                _logger.info("🎙️ STT %s: '%s'",
+                _logger.info("ðŸŽ™ï¸ STT %s: '%s'",
                              "FINAL" if is_final else "interim", transcript)
 
+                # âœ… Always update speech time when we receive text
                 conn.last_speech_time = now
 
                 if is_final:
+                    # ========================================
+                    # âœ… FINAL RESULT - ALWAYS ACCUMULATE
+                    # ========================================
                     current_buffer = conn.stt_transcript_buffer.strip()
 
                     if current_buffer:
-                        if (not current_buffer.endswith((".", "!", "?")) and len(transcript) > 3):
+                        # Check if this continues the current thought
+                        if (not current_buffer.endswith((".", "!", "?")) and
+                                len(transcript) > 3):
+                            # Continue the sentence
                             conn.stt_transcript_buffer += " " + transcript
-                            _logger.info(f"➕ Appending to sentence: '{transcript}'")
+                            _logger.info(
+                                f"âž• Appending to sentence: '{transcript}'")
                         else:
+                            # New thought or refinement
                             conn.stt_transcript_buffer = transcript
-                            _logger.info(f"🔄 New sentence: '{transcript}'")
+                            _logger.info(f"ðŸ”„ New sentence: '{transcript}'")
                     else:
+                        # First content
                         conn.stt_transcript_buffer = transcript
 
+                    # Mark that we have FINAL text
                     conn.stt_is_final = True
 
-                    _logger.info(f"🎙️ Complete buffer: '{conn.stt_transcript_buffer.strip()}'")
+                    _logger.info(
+                        f"ðŸ“ Complete buffer: '{conn.stt_transcript_buffer.strip()}'")
 
                 else:
+                    # ========================================
+                    # âœ… INTERIM RESULT - TRACK BUT DON'T OVERWRITE
+                    # ========================================
+
+                    # Track interim time for activity detection
                     conn.last_interim_time = now
                     conn.last_interim_text = transcript
 
+                    # Only use interim if we have no FINAL content yet
                     if not conn.stt_transcript_buffer or not conn.stt_is_final:
                         conn.stt_transcript_buffer = transcript
-                        _logger.info(f"🎙️ Interim as buffer: '{transcript}'")
+                        _logger.info(f"ðŸ“ Interim as buffer: '{transcript}'")
 
             except Exception as e:
-                _logger.error(f"❌ Error in on_message: {e}")
+                pass
 
         def on_open(self, open, **kwargs):
-            _logger.info("✅ Deepgram connection opened")
+            pass
 
         def on_error(self, error, **kwargs):
-            _logger.error(f"❌ Deepgram error: {error}")
+            pass
 
         def on_close(self, close_msg, **kwargs):
-            _logger.info("🔌 Deepgram connection closed")
+            pass
 
         def on_speech_started(self, speech_started, **kwargs):
+            """âœ… FIXED: Mark VAD trigger but require validation"""
             conn.vad_triggered_time = time.time()
-            conn.user_speech_detected = True
+            conn.user_speech_detected = True  # Tentatively set
             conn.speech_start_time = time.time()
-            _logger.info("🎤 VAD: Speech trigger (needs validation)")
+            _logger.info("ðŸŽ¤ VAD: Speech trigger (needs validation)")
 
         def on_utterance_end(self, utterance_end, **kwargs):
+            """âœ… FIXED: Clear VAD when Deepgram confirms utterance ended"""
             now = time.time()
 
+            # Check if we got interim text very recently (within 200ms)
             if conn.last_interim_time and (now - conn.last_interim_time) < 0.2:
-                _logger.info("⭐ UtteranceEnd ignored - recent interim detected")
+                _logger.info(
+                    "â­ï¸ UtteranceEnd ignored - recent interim detected")
                 return
 
+            # âœ… Clear VAD state when Deepgram confirms end
             if conn.user_speech_detected:
-                _logger.info("✅ UtteranceEnd - clearing VAD")
+                _logger.info(
+                    "âœ… UtteranceEnd - clearing VAD (Deepgram confirmed)")
                 conn.user_speech_detected = False
                 conn.speech_start_time = None
                 conn.vad_triggered_time = None
@@ -775,14 +809,18 @@ async def setup_streaming_stt(call_sid: str):
                 conn.energy_drop_time = None
 
             conn.last_speech_time = now
+            _logger.info(f"ðŸ•’ UtteranceEnd - last_speech_time: {now}")
 
         dg_connection.on(LiveTranscriptionEvents.Open, on_open)
         dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)
-        dg_connection.on(LiveTranscriptionEvents.SpeechStarted, on_speech_started)
-        dg_connection.on(LiveTranscriptionEvents.UtteranceEnd, on_utterance_end)
+        dg_connection.on(
+            LiveTranscriptionEvents.SpeechStarted, on_speech_started)
+        dg_connection.on(LiveTranscriptionEvents.UtteranceEnd,
+                         on_utterance_end)
         dg_connection.on(LiveTranscriptionEvents.Error, on_error)
         dg_connection.on(LiveTranscriptionEvents.Close, on_close)
 
+        # Minimal, safe options for Twilio mu-law 8k (works on deepgram-sdk 3.2)
         options = LiveOptions(
             model=os.getenv("DEEPGRAM_STT_MODEL", "nova-2"),
             language="en-US",
@@ -792,36 +830,39 @@ async def setup_streaming_stt(call_sid: str):
             encoding="mulaw",
             sample_rate=8000,
             channels=1,
+            # If you want Deepgram to emit UtteranceEnd reliably, try enabling endpointing:
+            # uncomment to try (if your project supports it)
             endpointing=UTTERANCE_END_MS,
         )
 
+        # start() is synchronous and returns bool in SDK 3.2
         start_ok = False
         try:
-            _logger.info("🎤 Starting Deepgram with options: %s", options)
             start_ok = dg_connection.start(options)
-            _logger.info("✅ Deepgram start() returned: %s", start_ok)
         except Exception as e:
-            _logger.error(f"❌ Deepgram start failed: {e}")
+            pass
 
         if not start_ok:
             fallback = LiveOptions(
-                model=os.getenv("DEEPGRAM_STT_FALLBACK_MODEL", "nova-2-general"),
+                model=os.getenv("DEEPGRAM_STT_FALLBACK_MODEL",
+                                "nova-2-general"),
                 encoding="mulaw",
                 sample_rate=8000,
                 interim_results=True,
+                # utterance_end_ms=UTTERANCE_END_MS,  # optional legacy param if endpointing not supported
             )
             try:
-                _logger.info("🎤 Trying fallback Deepgram model...")
                 start_ok = dg_connection.start(fallback)
             except Exception as e2:
-                _logger.error(f"❌ Fallback failed: {e2}")
                 return
 
         if start_ok:
             conn.deepgram_live = dg_connection
-            _logger.info("✅ Streaming STT initialized")
+            _logger.info("âœ… Streaming STT initialized")
         else:
-            _logger.error("❌ Deepgram start() returned False")
+            _logger.error(
+                "âŒ Deepgram start() returned False (model/options/API key)")
 
     except Exception as e:
-        _logger.error(f"❌ Setup streaming STT failed: {e}")
+        pass
+

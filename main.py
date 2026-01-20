@@ -410,7 +410,7 @@ DO NOT use any external knowledge or make assumptions.
 ## User's Current Question:
 {question}"""
     else:
-        prompt =  prompt = f"""You are MILA, a friendly voice assistant.
+        prompt = f"""You are MILA, a friendly voice assistant.
 ## Current Date:
 Today is {current_date}.
 
@@ -453,12 +453,12 @@ Respond naturally and briefly:"""
                 prompt=prompt,
                 stream=True,
                 options={
-                    "temperature": 0.3,
+                    "temperature": 0.1,
                     "num_predict": 500,
                     "top_k": 40,
-                    "top_p": 0.8,
-                    "num_ctx": 1024,
-                    "num_thread": 9,
+                    "top_p": 0.9,
+                    "num_ctx": 800,
+                    "num_thread": 8,
                     "repeat_penalty": 1.2,
                     "repeat_last_n": 128,
                     "num_gpu": 99,

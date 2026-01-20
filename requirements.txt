@@ -21,6 +21,5 @@ pytz
 datetime
 PyJWT
 
-openai-whisper
-TTS
+
 python-multipart    

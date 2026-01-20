@@ -59,7 +59,7 @@ ollama serve > /var/log/ollama.log 2>&1 &
 
 sleep 5
 
-ollama pull llama3:8b-instruct-q4_K_S
+ollama pull llama3:70b-instruct-q4_K_M
 
 ### -----------------------
 ### Step 7: Setup Data Folder
