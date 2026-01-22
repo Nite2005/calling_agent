@@ -44,11 +44,13 @@ TOP_K = int(os.getenv("TOP_K", "3"))
 
 # 🎯 SMART INTERRUPT SETTINGS - Optimized for fast, natural interruption
 INTERRUPT_ENABLED = os.getenv("INTERRUPT_ENABLED", "true").lower() == "true"
-INTERRUPT_MIN_ENERGY = int(os.getenv("INTERRUPT_MIN_ENERGY", "600"))  # Lower threshold for better sensitivity
+INTERRUPT_MIN_ENERGY = int(os.getenv("INTERRUPT_MIN_ENERGY", "500"))  # Lower threshold for better sensitivity
 INTERRUPT_DEBOUNCE_MS = int(os.getenv("INTERRUPT_DEBOUNCE_MS", "300"))  # Faster re-interrupt capability
-INTERRUPT_BASELINE_FACTOR = float(os.getenv("INTERRUPT_BASELINE_FACTOR", "2.2"))  # More sensitive to speech
-INTERRUPT_MIN_SPEECH_MS = int(os.getenv("INTERRUPT_MIN_SPEECH_MS", "150"))  # Faster interrupt trigger
+INTERRUPT_BASELINE_FACTOR = float(os.getenv("INTERRUPT_BASELINE_FACTOR", "2.0"))  # More sensitive to speech
+INTERRUPT_MIN_SPEECH_MS = int(os.getenv("INTERRUPT_MIN_SPEECH_MS", "100"))  # Faster interrupt trigger
 INTERRUPT_REQUIRE_TEXT = os.getenv("INTERRUPT_REQUIRE_TEXT", "false").lower() == "true"
+INTERRUPT_DEBUG = os.getenv("INTERRUPT_DEBUG", "false").lower() == "true"  # Enable detailed interrupt logging
+INTERRUPT_USE_VAD = os.getenv("INTERRUPT_USE_VAD", "true").lower() == "true"  # Use Deepgram VAD for interrupt validation
 
 # ✅ SILENCE DETECTION
 SILENCE_THRESHOLD_SEC = float(os.getenv("SILENCE_THRESHOLD_SEC", "0.8"))

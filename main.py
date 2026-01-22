@@ -8,7 +8,7 @@ import os
 import asyncio
 import time
 import re
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime as dt
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, Depends, Security
@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from sqlalchemy.orm import Session
 import ollama
+import torch
 
 # Import all submodules
 from models import (
@@ -290,23 +291,25 @@ async def execute_detected_tool(call_sid: str, tool_data: dict) -> dict:
 
 async def query_rag_streaming(
     question: str,
-    history: Optional[list] = None,
+    history: Optional[List[Dict[str, str]]] = None,
     top_k: int = TOP_K,
     call_sid: Optional[str] = None
 ):
-    """Query RAG with streaming response"""
+    """✨ ENHANCED: RAG with agent configuration and dynamic variables support"""
     if history is None:
         history = []
 
+    # Get current date in America/New_York timezone
     from datetime import datetime
     import pytz
     ny_tz = pytz.timezone('America/New_York')
     current_date = datetime.now(ny_tz).strftime("%A, %B %d, %Y")
     
+    # ✨ Load agent configuration and dynamic variables
     conn = manager.get(call_sid) if call_sid else None
     agent_prompt = None
     dynamic_vars = {}
-    model_to_use = OLLAMA_MODEL
+    model_to_use = OLLAMA_MODEL  # Default from env
     
     model_source = "env_default"
     
@@ -315,6 +318,7 @@ async def query_rag_streaming(
         dynamic_vars = conn.dynamic_variables or {}
         _logger.info(f"✅ Using agent prompt with {len(dynamic_vars)} dynamic variables")
         
+        # ✨ Use custom model if provided, otherwise agent default, otherwise env default
         if conn.custom_model and conn.custom_model.strip():
             model_to_use = conn.custom_model
             model_source = "api_override"
@@ -327,7 +331,6 @@ async def query_rag_streaming(
     loop = asyncio.get_running_loop()
 
     def _embed_and_query():
-        import torch
         with torch.no_grad():
             query_embedding = embedder.encode(
                 [question],
@@ -348,29 +351,30 @@ async def query_rag_streaming(
     raw_docs = results.get("documents", [[]])[0] if results else []
     distances = results.get("distances", [[]])[0] if results else []
 
-    # Filter by distance threshold for relevance
+    # Simple relevance filtering
     relevant_chunks = []
     for doc, dist in zip(raw_docs, distances):
-        if dist <= 1.0:  # Stricter threshold (was 1.3)
+        if dist <= 1.3:  # Simple threshold
             relevant_chunks.append(doc)
-            _logger.debug(f"📄 Chunk (dist={dist:.3f}): {doc[:80]}...")
-    
-    _logger.info(f"🔍 RAG: '{question[:60]}...' | Found {len(relevant_chunks)}/{len(raw_docs)} relevant chunks")
-    
-    if not relevant_chunks:
-        _logger.warning(f"⚠️ NO relevant chunks found! Distances: {[f'{d:.3f}' for d in distances[:3]]}")
 
-    context_text = "\n\n---\n\n".join(relevant_chunks[:3])
+    # Use top 3 most relevant
+    context_text = "\n".join(relevant_chunks[:3])
 
+    # _logger.info(f"📚 Found {len(relevant_chunks)} relevant chunks")
+
+    # Build conversation history
     history_text = ""
     if history and len(history) > 0:
-        recent_history = history[-6:]
+        recent_history = history[-6:]  # Keep last 3 exchanges
         history_lines = []
         for h in recent_history:
-            history_lines.append(f"User: {h['user']}\nAssistant: {h['assistant']}")
+            history_lines.append(
+                f"User: {h['user']}\nAssistant: {h['assistant']}")
         history_text = "\n".join(history_lines)
 
+    # ✨ BUILD PROMPT - Use agent's system_prompt if available, otherwise use default
     if agent_prompt:
+        # ✨ AGENT-BASED PROMPT with dynamic variables
         vars_section = ""
         if dynamic_vars:
             vars_lines = []
@@ -384,10 +388,19 @@ async def query_rag_streaming(
             call_context = f"""
         ## CALL CONTEXT (VERY IMPORTANT)
         You are on a LIVE PHONE CALL with a real person.
-        - DO NOT include stage directions or markdown
-        - Speak briefly and naturally
+        - DO NOT include:
+            - stage directions (e.g. **pause**, **laughs**, **sighs**)
+            - do not use **bold** or _italics_, just respond in normal text and paragraphs
+            - emotional markers (e.g. [happy], [thinking])
+            - symbols like *, [], (), <> 
+            - DO NOT describe actions or emotions.
+
         Current call phase: {conn.call_phase}
         Detected user intent: {conn.last_intent}
+
+        Speech rules:
+        - Speak briefly and naturally, like a human on the phone
+        - Never explain in long paragraphs until asked
         """
 
         prompt = f"""{agent_prompt}
@@ -397,67 +410,92 @@ async def query_rag_streaming(
 ## Current Date (America/New_York):
 Today is {current_date}.{vars_section}
 
-## CRITICAL INSTRUCTION:
-You MUST answer ONLY from the Knowledge Base Context below. If the information is NOT in the context, say: "I don't have that specific information. Let me connect you with someone who can help."
-DO NOT use any external knowledge or make assumptions.
+## Knowledge Base Context  (please make responses from only this company knowledge base):
+{context_text if context_text.strip() else "No specific context found for user's this current query."}
 
-## Knowledge Base Context:
-{context_text if context_text.strip() else "No specific context found."}
-
-## current conversation history:
+## current conversation history(if nothing is here, that means this is the start of the call):
 {history_text if history_text else ""}
 
 ## User's Current Question:
 {question}"""
     else:
-        prompt = f"""You are MILA, a friendly voice assistant.
-## Current Date:
+        prompt = f"""You are MILA, a friendly voice assistant for Technology Mindz. Technology Mindz provides key services: Salesforce, AI, Managed IT, Cybersecurity, Microsoft Dynamics 365, Staff Augmentation, CRM Consulting, Web Development, Mobile App Development.
+
+## Current Date (America/New_York):
 Today is {current_date}.
 
-## PHONE PERSONALITY:
-- You're on a LIVE phone call
+## YOUR PHONE PERSONALITY:
+- You're on a LIVE phone call with a real person
+- Speak naturally like a human would on the phone
 - Keep responses BRIEF (1-2 sentences max)
+- Use natural filler words: "um", "you know", "well", "actually", "yeah"
+- Acknowledge what they say naturally: "Got it", "Makes sense", "Oh interesting", "I see", "Right"
 - Sound conversational, not scripted
+- Mirror their energy and pace
 
-## Knowledge Base:
-{context_text if context_text else "No specific context."}
+## RESPONSE GUIDELINES:
+- For simple acknowledgments: Be brief and natural ("Yeah, got it" / "Makes sense" / "Okay, cool")
+- For questions: Answer concisely from the knowledge base
+- For confirmations: Respond naturally based on context (don't just say "okay got it" - be contextual)
+- For hesitation ("um", "uh"): Gently encourage them ("Take your time" / "What's on your mind?")
+- Never give long explanations - this is a phone call, not an essay
+
+## KNOWLEDGE BASE RULES:
+- Only use company knowledge base for factual answers
+- If something isn't in the knowledge base, say "I'm not sure about that, but let me connect you with someone who can help"
+- Never make up information
+
+## MEETING SCHEDULING:
+- When relevant, offer to schedule meetings
+- Ask for: date, time, timezone (only FUTURE dates)
+- After getting details: [TOOL:meeting_call:DATE:TIMEZONE:address]
+- If valid=true: confirm scheduled, else: apologize and reschedule
+
+## ENDING CALLS:
+- If they want to end ("bye", "that's all", "talk later"), output: [TOOL:end_call]
 
 ## Previous Conversation:
 {history_text if history_text else "This is the start of the call."}
+
+## Knowledge Base:
+{context_text if context_text else "No specific context."}
 
 ## What they just said:
 {question}
 
 Respond naturally and briefly:"""
 
+    # Rest of your streaming code remains the same...
     queue: asyncio.Queue = asyncio.Queue(maxsize=500)
     full_response = ""
 
     def _safe_put(item):
+        """Safely put item in queue, handling QueueFull gracefully"""
         try:
             queue.put_nowait(item)
         except asyncio.QueueFull:
+            # Queue is full - drop to prevent blocking
+            # Try to make space by removing oldest item if queue is very full
             if queue.qsize() > 400:
                 try:
-                    queue.get_nowait()
-                    queue.put_nowait(item)
+                    queue.get_nowait()  # Remove one old item
+                    queue.put_nowait(item)  # Try again
                 except:
-                    pass
+                    pass  # If that fails, just drop the item
 
     def _producer():
         nonlocal full_response
         try:
-            _logger.info(f"🤖 Calling Ollama with model: {model_to_use}")
             for chunk in ollama.generate(
                 model=model_to_use,
                 prompt=prompt,
                 stream=True,
                 options={
-                    "temperature": 0.1,
-                    "num_predict": 500,
+                    "temperature": 0.2,
+                    "num_predict": 1200,
                     "top_k": 40,
                     "top_p": 0.9,
-                    "num_ctx": 800,
+                    "num_ctx": 1024,
                     "num_thread": 8,
                     "repeat_penalty": 1.2,
                     "repeat_last_n": 128,
@@ -470,9 +508,7 @@ Respond naturally and briefly:"""
                     full_response += token
                     loop.call_soon_threadsafe(_safe_put, token)
             loop.call_soon_threadsafe(_safe_put, None)
-            _logger.info(f"✅ Ollama generation completed: {len(full_response)} chars")
         except Exception as e:
-            _logger.error(f"❌ Ollama error: {e}", exc_info=True)
             loop.call_soon_threadsafe(_safe_put, {"__error__": str(e)})
 
     loop.run_in_executor(None, _producer)
@@ -486,6 +522,7 @@ Respond naturally and briefly:"""
                 yield "I'm having trouble responding right now. Could you repeat that?"
                 return
 
+            # Yield tokens immediately (consumer will decide when to speak)
             yield item
 
     except Exception as e:
@@ -1347,7 +1384,11 @@ async def media_ws(websocket: WebSocket):
                 payload_b64 = media_data.get("payload")
 
                 if payload_b64:
-                    _logger.info(f"📞 Received media chunk ({len(payload_b64)} bytes)")
+                    # Initialize chunk counter if not exists
+                    if not hasattr(websocket, 'chunk_count'):
+                        websocket.chunk_count = 0
+                    chunk_count = websocket.chunk_count
+                    websocket.chunk_count += 1
 
                     try:
                         import base64
@@ -1370,13 +1411,21 @@ async def media_ws(websocket: WebSocket):
 
                         now = time.time()
 
-                        from utils import INTERRUPT_BASELINE_FACTOR, INTERRUPT_MIN_ENERGY, INTERRUPT_ENABLED, INTERRUPT_MIN_SPEECH_MS, INTERRUPT_DEBOUNCE_MS, INTERRUPT_REQUIRE_TEXT
+                        from utils import INTERRUPT_BASELINE_FACTOR, INTERRUPT_MIN_ENERGY, INTERRUPT_ENABLED, INTERRUPT_MIN_SPEECH_MS, INTERRUPT_DEBOUNCE_MS, INTERRUPT_REQUIRE_TEXT, INTERRUPT_DEBUG, INTERRUPT_USE_VAD
                         energy_threshold = max(
                             conn.baseline_energy * INTERRUPT_BASELINE_FACTOR,
                             INTERRUPT_MIN_ENERGY
                         )
+                        
+                        # 🐛 DEBUG: Log interrupt detection state every 50 chunks
+                        if INTERRUPT_DEBUG and chunk_count % 50 == 0:
+                            _logger.debug(
+                                f"📊 Interrupt State: energy={energy:.0f} threshold={energy_threshold:.0f} "
+                                f"baseline={conn.baseline_energy:.0f} speaking={conn.currently_speaking} "
+                                f"requested={conn.interrupt_requested}"
+                            )
 
-                        # 🎯 ULTRA-RESPONSIVE INTERRUPT DETECTION
+                        # 🎯 VAD + ENERGY HYBRID INTERRUPT DETECTION
                         if (INTERRUPT_ENABLED and conn.agent_config and 
                             conn.agent_config.get("interrupt_enabled", True) and 
                             conn.currently_speaking and not conn.interrupt_requested):
@@ -1388,15 +1437,20 @@ async def media_ws(websocket: WebSocket):
                                 # Mark speech start time on first high energy detection
                                 if conn.speech_start_time is None:
                                     conn.speech_start_time = now
-                                    _logger.debug(f"🎙️ Interrupt detection: energy={energy:.0f} > {energy_threshold:.0f}")
+                                    if INTERRUPT_DEBUG:
+                                        _logger.info(f"🎙️ Energy detection START: energy={energy:.0f} > {energy_threshold:.0f} VAD={conn.vad_validated}")
                                 
-                                # FAST TRIGGER: Need only 2 consecutive high-energy samples
-                                if len(conn.speech_energy_buffer) >= 2:
-                                    recent_samples = list(conn.speech_energy_buffer)[-3:]
+                                # ⚡ HYBRID TRIGGER: Combine energy + VAD for accuracy
+                                # If VAD is enabled, require VAD confirmation + energy
+                                # If VAD disabled, use energy only
+                                vad_check_passed = (not INTERRUPT_USE_VAD) or conn.vad_validated
+                                
+                                if len(conn.speech_energy_buffer) >= 1 and vad_check_passed:
+                                    recent_samples = list(conn.speech_energy_buffer)[-2:]
                                     high_energy_count = sum(1 for e in recent_samples if e > energy_threshold)
                                     
-                                    # Trigger if 2 out of last 3 samples are high energy
-                                    if high_energy_count >= 2:
+                                    # Trigger if ANY recent sample is high energy (instant response)
+                                    if high_energy_count >= 1:
                                         speech_duration_ms = (now - conn.speech_start_time) * 1000
                                         
                                         # Lower minimum duration for faster response
@@ -1408,16 +1462,29 @@ async def media_ws(websocket: WebSocket):
                                                 has_text = bool(conn.stt_transcript_buffer.strip()) if INTERRUPT_REQUIRE_TEXT else True
                                                 
                                                 if has_text:
-                                                    _logger.info(f"⚡ INTERRUPT! energy={energy:.0f} threshold={energy_threshold:.0f} duration={speech_duration_ms:.0f}ms")
+                                                    vad_status = "VAD+Energy" if (INTERRUPT_USE_VAD and conn.vad_validated) else "Energy-only"
+                                                    _logger.info(
+                                                        f"⚡ INTERRUPT TRIGGERED ({vad_status})! energy={energy:.0f} threshold={energy_threshold:.0f} "
+                                                        f"duration={speech_duration_ms:.0f}ms samples={len(conn.speech_energy_buffer)} "
+                                                        f"debounce_ok={time_since_last_interrupt:.0f}ms"
+                                                    )
                                                     conn.last_interrupt_time = now
+                                                    conn.vad_validated = False  # Reset VAD flag
                                                     await handle_interrupt(current_call_sid)
                                                     # Clear buffer after successful interrupt
                                                     conn.speech_energy_buffer.clear()
                                                     conn.speech_start_time = None
+                                                elif INTERRUPT_DEBUG:
+                                                    _logger.debug(f"❌ Interrupt blocked: text_required={INTERRUPT_REQUIRE_TEXT} has_text={bool(conn.stt_transcript_buffer.strip())}")
+                                            elif INTERRUPT_DEBUG:
+                                                _logger.debug(f"❌ Interrupt blocked by debounce: {time_since_last_interrupt:.0f}ms < {INTERRUPT_DEBOUNCE_MS}ms")
+                                        elif INTERRUPT_DEBUG:
+                                            _logger.debug(f"❌ Interrupt blocked by duration: {speech_duration_ms:.0f}ms < {INTERRUPT_MIN_SPEECH_MS}ms")
                             else:
                                 # Reset when energy drops (with lower threshold for faster reset)
                                 if conn.speech_start_time is not None and energy < (energy_threshold * 0.6):
-                                    _logger.debug(f"⬇️ Energy dropped, resetting")
+                                    if INTERRUPT_DEBUG:
+                                        _logger.debug(f"⬇️ Energy dropped to {energy:.0f}, resetting detection")
                                     conn.speech_energy_buffer.clear()
                                     conn.speech_start_time = None
 

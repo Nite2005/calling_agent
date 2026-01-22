@@ -551,6 +551,7 @@ async def stream_tts_worker(call_sid: str):
                                         if not success:
                                             interrupted = True
                                             break
+                                        await asyncio.sleep(0.018)
 
                                         conn.last_tts_send_time = time.time()
                                         chunk_count += 1
@@ -660,6 +661,14 @@ async def speak_text_streaming(call_sid: str, text: str):
     if not conn or not conn.stream_sid:
         return
 
+    # 🔥 CRITICAL: Set flag BEFORE any processing to enable interrupt detection
+    conn.currently_speaking = True
+    conn.interrupt_requested = False
+    conn.speech_energy_buffer.clear()
+    conn.user_speech_detected = False
+    
+    _logger.info(f"🎤 Starting TTS playback - interrupt detection ENABLED")
+
     try:
         if conn.stream_sid:  # ✅ Validate stream_sid exists
             await conn.ws.send_json({
@@ -668,11 +677,6 @@ async def speak_text_streaming(call_sid: str, text: str):
             })
     except:
         pass
-
-    conn.currently_speaking = True
-    conn.interrupt_requested = False
-    conn.speech_energy_buffer.clear()
-    conn.user_speech_detected = False
 
     # âœ… Split into sentences for queue
     sentences = []
@@ -763,11 +767,11 @@ async def setup_streaming_stt(call_sid: str):
                     # Track interim time for activity detection
                     conn.last_interim_time = now
                     conn.last_interim_text = transcript
-
+                    return 
                     # Only use interim if we have no FINAL content yet
-                    if not conn.stt_transcript_buffer or not conn.stt_is_final:
-                        conn.stt_transcript_buffer = transcript
-                        _logger.info(f"ðŸ“ Interim as buffer: '{transcript}'")
+                    # if not conn.stt_transcript_buffer or not conn.stt_is_final:
+                    #     conn.stt_transcript_buffer = transcript
+                    #     _logger.info(f"ðŸ“ Interim as buffer: '{transcript}'")
 
             except Exception as e:
                 pass
@@ -782,11 +786,20 @@ async def setup_streaming_stt(call_sid: str):
             pass
 
         def on_speech_started(self, speech_started, **kwargs):
-            """âœ… FIXED: Mark VAD trigger but require validation"""
-            conn.vad_triggered_time = time.time()
-            conn.user_speech_detected = True  # Tentatively set
-            conn.speech_start_time = time.time()
-            _logger.info("ðŸŽ¤ VAD: Speech trigger (needs validation)")
+            """✅ VAD: Mark when Deepgram detects speech start"""
+            now = time.time()
+            
+            # Only trigger VAD if we're not already in speech detection
+            if not conn.user_speech_detected:
+                conn.vad_triggered_time = now
+                conn.user_speech_detected = True
+                conn.speech_start_time = now
+                _logger.info("🎤 VAD: Speech START detected by Deepgram")
+            
+            # If AI is speaking, mark for potential interrupt
+            if conn.currently_speaking:
+                conn.vad_validated = True  # Deepgram confirmed real speech
+                _logger.info("⚡ VAD: User speaking while AI active - interrupt candidate")
 
         def on_utterance_end(self, utterance_end, **kwargs):
             """âœ… FIXED: Clear VAD when Deepgram confirms utterance ended"""
